@@ -6,18 +6,17 @@ import * as FileSystem from 'expo-file-system';
 import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
 import { FFmpegKit } from 'ffmpeg-kit-react-native';
 import Slider from '@react-native-community/slider';
-import Bar from './components/svgs/Bar';
-import ArrowCircle from './components/svgs/ArrowCircle';
-import ArrowLeft from './components/svgs/ArrowLeft';
-import ShareSvg from './components/svgs/ShareSvg';
+import ArrowCircle from './components/resuables/svgs/ArrowCircle';
+import ArrowLeft from './components/resuables/svgs/ArrowLeft';
+import ShareSvg from './components/resuables/svgs/ShareSvg';
 import { useFonts } from 'expo-font';
+import Cog from './components/resuables/svgs/Cog';
 
 const outputDir = FileSystem.documentDirectory + "split-videos/"
 export default function App() {
   const [fontsLoaded] = useFonts({
-    'Roboto-Bold': require('./assets/fonts/ComicNeue-Bold.ttf'),
+    'ComicNeue-Bold': require('./assets/fonts/ComicNeue-Bold.ttf'),
   });
-
   type uploadedVideo = {
     uri: string,
     filename: string,
@@ -35,7 +34,9 @@ export default function App() {
   const [storedVideoUris, storedVideoUrisSet] = useState<string[]>([]);
   const [currentBarSelected, currentBarSelectedSet] = useState<"start" | "end">("start");
   const [showingSettings, showingSettingsSet] = useState(false);
+  const [editingSegmentTime, editingSegmentTimeSet] = useState(false);
 
+  const inputTimeout = useRef<NodeJS.Timeout>()
   const previewVideo = useRef<Video>(null!)
   const [videoControls, videoControlsSet] = useState<videoControlsType>({
     startTime: 0,
@@ -89,8 +90,6 @@ export default function App() {
   };
 
   const onEndTimeChange = (endTime: number) => {
-    let localOffset = 0
-
     videoControlsSet(prev => {
       const newControls = { ...prev }
       newControls.endTime = endTime
@@ -99,11 +98,11 @@ export default function App() {
         newControls.endTime = newControls.startTime
       }
 
-      localOffset = (videoControls.endTime - videoControls.startTime) >= 1000 ? 1000 : 0
+      previewVideo.current.pauseAsync()
+      previewVideo.current.setPositionAsync(newControls.endTime)
+
       return newControls
     });
-
-    previewVideo.current.playFromPositionAsync(endTime - localOffset)
   }
 
   const uploadVideo = async () => {
@@ -197,6 +196,7 @@ export default function App() {
   };
 
   const onShare = async (seenUris: string[], seenOutputDir: string, singleShare = false) => {
+    if (seenUris.length === 0) return
 
     if (singleShare) {
       const shareResponse = await Share.open({
@@ -304,23 +304,15 @@ export default function App() {
           source={require("./assets/logo.png")}
         />
 
-        <Text style={{ fontWeight: "bold", fontSize: 32, color: "#fff", fontFamily: "Roboto-Bold" }}>Story Slice</Text>
+        <Text style={{ fontWeight: "bold", fontSize: 32, color: "#fff" }}>Story Slice</Text>
 
-        <Pressable onPress={() => { showingSettingsSet(true) }}>
-          <Bar style={styles.svg} fill={"#fff"} />
+        <Pressable onPress={() => { showingSettingsSet(prev => !prev) }}>
+          <Cog style={styles.svg} fill={showingSettings ? "#D6E5E3" : "#fff"} />
         </Pressable>
       </View>
 
-      {showingSettings && (
-        <View style={{ position: "absolute", top: 0, right: 0, backgroundColor: "yellow", zIndex: 999, padding: 8, width: 300, minHeight: 700 }}>
-          <Button title='Close' onPress={() => showingSettingsSet(false)} />
-
-          <Text>Settings</Text>
-        </View>
-      )}
-
-      <View style={{ backgroundColor: "#A6B1E1", flex: 2, flexDirection: "row", gap: 8, padding: 8 }}>
-        <View style={{ flex: .6, gap: 8 }}>
+      <View style={{ backgroundColor: "#A6B1E1", flex: 2, flexDirection: "row", gap: 8, padding: 8, position: "relative" }}>
+        <View style={{ display: showingSettings ? "flex" : "none", flex: .6, gap: 8 }}>
           <Pressable style={[styles.settingsContSmall, { justifyContent: 'center', alignItems: 'center' }]} onPress={() => changeRotation(videoControls.rotate)}>
             <ArrowCircle height={40} width={40} rotation={videoControls.rotate === null ? 0 : videoControls.rotate === 90 ? 90 : videoControls.rotate === 180 ? 180 : 270} />
           </Pressable>
@@ -336,10 +328,53 @@ export default function App() {
               <ArrowLeft height={40} width={40} rotation={180} />
             </Pressable>
           </View>
+
+          <Pressable onPress={() => { editingSegmentTimeSet(true) }} style={[styles.settingsContSmall, { justifyContent: "center", alignItems: "center", position: 'relative' }]}>
+            <Text style={{ fontWeight: "bold" }}>{isNaN(videoControls.amtToSegment) ? "" : `${videoControls.amtToSegment}s`}</Text>
+            <Text style={{ fontWeight: "bold" }}>split</Text>
+          </Pressable>
         </View>
 
+        {editingSegmentTime && (
+          <Pressable onPress={() => {
+            editingSegmentTimeSet(false)
+
+            if (isNaN(videoControls.amtToSegment)) {
+              videoControlsSet(prev => {
+                return {
+                  ...prev,
+                  amtToSegment: 30
+                }
+              })
+            }
+
+          }} style={{ position: "absolute", top: 0, left: 0, bottom: 0, right: 0, backgroundColor: "rgba(0,0,0,0.5)", alignItems: "center", justifyContent: "center", zIndex: 10 }}>
+
+            <Pressable onPress={(e) => {
+              e.stopPropagation()
+            }} style={{ flexDirection: "row" }}>
+              <TextInput
+                style={{ textAlign: "center", backgroundColor: "white", flex: .5, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 }}
+                onChangeText={(e) => {
+                  if (inputTimeout.current) clearTimeout(inputTimeout.current)
+
+                  videoControlsSet(prev => {
+                    const newNum = parseInt(e)
+                    return {
+                      ...prev,
+                      amtToSegment: newNum
+                    }
+                  })
+                }}
+                value={`${isNaN(videoControls.amtToSegment) ? "" : videoControls.amtToSegment}`}
+                keyboardType="numeric"
+              />
+            </Pressable>
+          </Pressable>
+        )}
+
         <View style={{ flex: 1.5, position: "relative", }}>
-          <View style={{ alignItems: "center" }}>
+          <View style={{ display: showingSettings ? "flex" : "none", alignItems: "center" }}>
             <Text style={{ opacity: videoControls.rotate === null ? 0 : 1, textAlign: "center", fontSize: 8 }}>rotate video {videoControls.rotate === 90 ? 90 : videoControls.rotate === 180 ? 180 : 270} degrees</Text>
             <Text>Duration: {videoDuration}s</Text>
 
@@ -367,7 +402,7 @@ export default function App() {
           />
         </View>
 
-        <View style={{ flex: 1, position: "relative", justifyContent: "space-between", alignItems: "center" }}>
+        <View style={{ display: showingSettings ? "flex" : "none", opacity: showingSettings ? 1 : 0, flex: 1, position: "relative", justifyContent: "space-between", alignItems: "center" }}>
           <Text>{millToTime(videoControls.startTime)}</Text>
 
           <View style={{ transform: [{ rotate: "90deg" }], position: "absolute", top: 115, left: -65, width: 250, gap: 32 }}>
@@ -419,14 +454,21 @@ export default function App() {
         </ScrollView>
       </View>
 
-      <View style={{ backgroundColor: "#160D1A", flex: 1, flexDirection: 'row', justifyContent: "space-evenly", alignItems: "center" }}>
-        <TouchableOpacity activeOpacity={0.8} style={styles.settingsButton} onPress={handleWantsToSplit}>
-          <Text style={styles.settingsButtonText}>split</Text>
-        </TouchableOpacity>
+      <View style={{ backgroundColor: "#160D1A", flex: 1, flexDirection: 'row', justifyContent: "center", alignItems: "center", gap: 16, borderTopColor: "#D6E5E3", borderTopWidth: 3 }}>
+        {uploadedVideoInfo && (
+          <TouchableOpacity activeOpacity={0.8} style={styles.settingsButton} onPress={handleWantsToSplit}>
+            <Text style={styles.settingsButtonText}>split</Text>
+          </TouchableOpacity>
+        )}
 
-        <TouchableOpacity activeOpacity={0.8} style={styles.settingsButton} onPress={() => { onShare(storedVideoUris, outputDir) }}>
-          <Text style={[styles.settingsButtonText, { fontSize: 30 }]}>share</Text>
-        </TouchableOpacity>
+        {storedVideoUris.length > 0 && (
+          <TouchableOpacity activeOpacity={0.8} style={{ position: "relative", top: -48 }} onPress={() => { onShare(storedVideoUris, outputDir) }}>
+            <Image
+              style={{ width: 120, height: 120, aspectRatio: "1/1", borderRadius: 8 }}
+              source={require("./assets/share.png")}
+            />
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity activeOpacity={0.8} style={styles.settingsButton} onPress={uploadVideo}>
           <Text style={styles.settingsButtonText}>upload</Text>
@@ -457,7 +499,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#D6E5E3",
   },
   settingsButtonText: {
-    fontWeight: "bold"
+    fontWeight: "bold",
+    textTransform: "uppercase"
   },
   svg: {
     width: 25,

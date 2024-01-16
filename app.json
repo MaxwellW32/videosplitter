@@ -1,14 +1,14 @@
 {
   "expo": {
-    "name": "videosplitter",
-    "slug": "videosplitter",
+    "name": "StorySlice",
+    "slug": "StorySlice",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/logo.png",
     "userInterfaceStyle": "light",
     "splash": {
       "image": "./assets/splash.png",
-      "resizeMode": "contain",
+      "resizeMode": "cover",
       "backgroundColor": "#ffffff"
     },
     "assetBundlePatterns": [
@@ -19,17 +19,17 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/logo.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.spidermax32.videosplitter"
+      "package": "com.spidermax32.StorySlice"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/logo.png"
     },
     "extra": {
       "eas": {
-        "projectId": "4b462400-a311-4879-a9a6-0aa4873c2469"
+        "projectId": "8426f087-3e88-4406-8be8-cfa173bfcbf7"
       }
     },
     "plugins": [
