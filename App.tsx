@@ -1,22 +1,18 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useMemo, useEffect } from 'react';
 import { StyleSheet, Text, View, SafeAreaView, StatusBar, Button, ScrollView, Image, Pressable, TextInput, Alert, TouchableOpacity } from 'react-native';
 import Share from 'react-native-share';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
-import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
+import { Video, ResizeMode } from 'expo-av';
 import { FFmpegKit } from 'ffmpeg-kit-react-native';
 import Slider from '@react-native-community/slider';
 import ArrowCircle from './components/resuables/svgs/ArrowCircle';
 import ArrowLeft from './components/resuables/svgs/ArrowLeft';
 import ShareSvg from './components/resuables/svgs/ShareSvg';
-import { useFonts } from 'expo-font';
 import Cog from './components/resuables/svgs/Cog';
 
 const outputDir = FileSystem.documentDirectory + "split-videos/"
 export default function App() {
-  const [fontsLoaded] = useFonts({
-    'ComicNeue-Bold': require('./assets/fonts/ComicNeue-Bold.ttf'),
-  });
   type uploadedVideo = {
     uri: string,
     filename: string,
@@ -35,6 +31,14 @@ export default function App() {
   const [currentBarSelected, currentBarSelectedSet] = useState<"start" | "end">("start");
   const [showingSettings, showingSettingsSet] = useState(false);
   const [editingSegmentTime, editingSegmentTimeSet] = useState(false);
+
+  const [loadingSplitVideo, splittingVideoSet] = useState<{
+    running: boolean,
+    duration: number | null
+  }>({
+    running: false,
+    duration: null
+  });
 
   const inputTimeout = useRef<NodeJS.Timeout>()
   const previewVideo = useRef<Video>(null!)
@@ -85,8 +89,6 @@ export default function App() {
 
       return newControls
     })
-
-    previewVideo.current.playFromPositionAsync(startTime)
   };
 
   const onEndTimeChange = (endTime: number) => {
@@ -97,10 +99,6 @@ export default function App() {
       if (newControls.endTime < newControls.startTime) {
         newControls.endTime = newControls.startTime
       }
-
-      previewVideo.current.pauseAsync()
-      previewVideo.current.setPositionAsync(newControls.endTime)
-
       return newControls
     });
   }
@@ -162,6 +160,9 @@ export default function App() {
 
   const splitVideo = async (uploadedVideo: uploadedVideo, outputDir: string, seenVideoControls: videoControlsType, seenDuration: string) => {
     await ensureDirExists(outputDir)
+    splittingVideoSet(prev => {
+      return { ...prev, running: true, duration: null }
+    })
 
     const rotateFilter = seenVideoControls.rotate === null ? "" :
       seenVideoControls.rotate === 90 ? `transpose=1,` :
@@ -185,6 +186,10 @@ export default function App() {
       if (returnCode.isValueSuccess()) {
         console.log(`Encode completed successfully in ${duration} milliseconds;`);
 
+        splittingVideoSet(prev => {
+          return { ...prev, duration: duration }
+        })
+
       } else if (returnCode.isValueCancel()) {
         console.log('Encode canceled');
       } else {
@@ -193,6 +198,12 @@ export default function App() {
         );
       }
     });
+
+    setTimeout(() => {
+      splittingVideoSet(prev => {
+        return { ...prev, running: false }
+      })
+    }, 1500);
   };
 
   const onShare = async (seenUris: string[], seenOutputDir: string, singleShare = false) => {
@@ -230,6 +241,10 @@ export default function App() {
     if (seenVideoUris) storedVideoUrisSet(seenVideoUris)
   }
 
+  useEffect(() => {
+    console.log(`this changed`, storedVideoUris);
+
+  }, [storedVideoUris])
   const onPlaybackStatusUpdate = (status: any, seenVideoControls: videoControlsType) => {
     if (status.positionMillis >= seenVideoControls.endTime) {
       previewVideo.current.playFromPositionAsync(seenVideoControls.startTime)
@@ -289,11 +304,6 @@ export default function App() {
     })
   }
 
-
-  if (!fontsLoaded) {
-    return null;
-  }
-
   return (
     <SafeAreaView style={styles.appContainer}>
       <StatusBar barStyle="light-content" backgroundColor={"#242734"} />
@@ -335,6 +345,85 @@ export default function App() {
           </Pressable>
         </View>
 
+        <View style={{ flex: 1.5, position: "relative", }}>
+          <View style={{ display: showingSettings ? "flex" : "none", alignItems: "center" }}>
+            <Text style={{ opacity: videoControls.rotate === null ? 0 : 1, textAlign: "center", fontSize: 8 }}>rotate video {videoControls.rotate === 90 ? 90 : videoControls.rotate === 180 ? 180 : 270} degrees</Text>
+            <Text>Duration: {videoDuration}s</Text>
+
+            <Text>Move {currentBarSelected} 100ms</Text>
+
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <Pressable style={{ backgroundColor: 'green', padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("back", currentBarSelected, previewVideo.current)}>
+                <Text style={{ fontWeight: "bold" }}>backward</Text>
+              </Pressable>
+
+              <Pressable style={{ backgroundColor: 'green', padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("forward", currentBarSelected, previewVideo.current)}>
+                <Text style={{ fontWeight: "bold" }}>forward</Text>
+              </Pressable>
+            </View>
+          </View>
+
+          {uploadedVideoInfo ? (
+            <Video
+              style={{ flex: 1 }}
+              ref={previewVideo}
+              source={{ uri: uploadedVideoInfo.uri }}
+              useNativeControls
+              resizeMode={ResizeMode.CONTAIN}
+              isLooping
+              onPlaybackStatusUpdate={(e) => { onPlaybackStatusUpdate(e, videoControls) }}
+            />
+          ) : (
+            <View style={{ alignItems: "center", justifyContent: "center", flex: 1 }}>
+              <Text style={{ fontSize: 30, fontWeight: "bold", color: "#fff" }}>Get Started</Text>
+              <Text style={{ fontSize: 20, fontWeight: "bold", color: "#fff" }}>Upload a video below</Text>
+            </View>
+          )}
+        </View>
+
+        <View style={{ display: showingSettings ? "flex" : "none", opacity: showingSettings ? 1 : 0, flex: 1, position: "relative", justifyContent: "space-between", alignItems: "center" }}>
+          <Text>{millToTime(videoControls.startTime)}</Text>
+
+          <View style={{ transform: [{ rotate: "90deg" }], position: "absolute", top: 115, left: -65, width: 250, gap: 32 }}>
+            <Slider
+              onSlidingStart={() => {
+              }}
+              onSlidingComplete={async () => {
+                currentBarSelectedSet("end")
+                await previewVideo.current.pauseAsync()
+                previewVideo.current.setPositionAsync(videoControls.endTime)
+
+              }}
+              minimumValue={1}
+              maximumValue={videoControls.maxTime}
+              value={videoControls.endTime}
+              onValueChange={onEndTimeChange}
+              minimumTrackTintColor="#FFFFFF"
+              maximumTrackTintColor="#000000"
+            />
+
+            <Slider
+              onSlidingStart={() => {
+                previewVideo.current.pauseAsync()
+              }}
+              onSlidingComplete={async () => {
+                currentBarSelectedSet("start")
+                await previewVideo.current.setPositionAsync(videoControls.startTime)
+                previewVideo.current.playAsync()
+              }}
+              vertical={true}
+              minimumValue={0}
+              maximumValue={videoControls.maxTime}
+              value={videoControls.startTime}
+              onValueChange={onStartTimeChange}
+              minimumTrackTintColor="#FFFFFF"
+              maximumTrackTintColor="#000000"
+            />
+          </View>
+
+          <Text>{millToTime(videoControls.endTime)}</Text>
+        </View>
+
         {editingSegmentTime && (
           <Pressable onPress={() => {
             editingSegmentTimeSet(false)
@@ -373,64 +462,17 @@ export default function App() {
           </Pressable>
         )}
 
-        <View style={{ flex: 1.5, position: "relative", }}>
-          <View style={{ display: showingSettings ? "flex" : "none", alignItems: "center" }}>
-            <Text style={{ opacity: videoControls.rotate === null ? 0 : 1, textAlign: "center", fontSize: 8 }}>rotate video {videoControls.rotate === 90 ? 90 : videoControls.rotate === 180 ? 180 : 270} degrees</Text>
-            <Text>Duration: {videoDuration}s</Text>
+        {loadingSplitVideo.running && (
+          <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "center", alignItems: 'center', backgroundColor: "rgba(0,0,0,0.2)" }}>
+            <View style={{ backgroundColor: "#fff", padding: 32, gap: 8 }}>
+              <Text>
+                {loadingSplitVideo.duration ? `Completed in ${loadingSplitVideo.duration / 1000}s` : `Loading...`}
+              </Text>
 
-            <Text>Move {currentBarSelected} 100ms</Text>
-
-            <View style={{ flexDirection: "row", gap: 8 }}>
-              <Pressable style={{ backgroundColor: 'green', padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("back", currentBarSelected, previewVideo.current)}>
-                <Text style={{ fontWeight: "bold" }}>backward</Text>
-              </Pressable>
-
-              <Pressable style={{ backgroundColor: 'green', padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("forward", currentBarSelected, previewVideo.current)}>
-                <Text style={{ fontWeight: "bold" }}>forward</Text>
-              </Pressable>
+              <Text style={{ fontSize: 8, maxWidth: 100 }}>Note - scaling/rotating the video will take longer to process.</Text>
             </View>
           </View>
-
-          <Video
-            style={{ flex: 1 }}
-            ref={previewVideo}
-            source={{ uri: uploadedVideoInfo ? uploadedVideoInfo.uri : "" }}
-            useNativeControls
-            resizeMode={ResizeMode.CONTAIN}
-            isLooping
-            onPlaybackStatusUpdate={(e) => { onPlaybackStatusUpdate(e, videoControls) }}
-          />
-        </View>
-
-        <View style={{ display: showingSettings ? "flex" : "none", opacity: showingSettings ? 1 : 0, flex: 1, position: "relative", justifyContent: "space-between", alignItems: "center" }}>
-          <Text>{millToTime(videoControls.startTime)}</Text>
-
-          <View style={{ transform: [{ rotate: "90deg" }], position: "absolute", top: 115, left: -65, width: 250, gap: 32 }}>
-            <Slider
-              onSlidingComplete={() => currentBarSelectedSet("end")}
-              minimumValue={1}
-              maximumValue={videoControls.maxTime}
-              value={videoControls.endTime}
-              onValueChange={onEndTimeChange}
-              minimumTrackTintColor="#FFFFFF"
-              maximumTrackTintColor="#000000"
-            />
-
-            <Slider
-              // style={{ position: "absolute", top: 0, width: 100, transform: [{ rotate: "90deg" }] }}
-              onSlidingComplete={() => currentBarSelectedSet("start")}
-              vertical={true}
-              minimumValue={0}
-              maximumValue={videoControls.maxTime}
-              value={videoControls.startTime}
-              onValueChange={onStartTimeChange}
-              minimumTrackTintColor="#FFFFFF"
-              maximumTrackTintColor="#000000"
-            />
-          </View>
-
-          <Text>{millToTime(videoControls.endTime)}</Text>
-        </View>
+        )}
       </View>
 
       <View style={{ flex: 1.5 }}>
@@ -454,7 +496,7 @@ export default function App() {
         </ScrollView>
       </View>
 
-      <View style={{ backgroundColor: "#160D1A", flex: 1, flexDirection: 'row', justifyContent: "center", alignItems: "center", gap: 16, borderTopColor: "#D6E5E3", borderTopWidth: 3 }}>
+      <View style={{ backgroundColor: "hsl(288, 33%, 5%)", flex: 1, flexDirection: 'row', justifyContent: "center", alignItems: "center", gap: 16, borderTopColor: "#D6E5E3", borderTopWidth: 2 }}>
         {uploadedVideoInfo && (
           <TouchableOpacity activeOpacity={0.8} style={styles.settingsButton} onPress={handleWantsToSplit}>
             <Text style={styles.settingsButtonText}>split</Text>
@@ -462,7 +504,7 @@ export default function App() {
         )}
 
         {storedVideoUris.length > 0 && (
-          <TouchableOpacity activeOpacity={0.8} style={{ position: "relative", top: -48 }} onPress={() => { onShare(storedVideoUris, outputDir) }}>
+          <TouchableOpacity activeOpacity={0.8} style={{ position: "relative", top: -40 }} onPress={() => { onShare(storedVideoUris, outputDir) }}>
             <Image
               style={{ width: 120, height: 120, aspectRatio: "1/1", borderRadius: 8 }}
               source={require("./assets/share.png")}

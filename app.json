@@ -15,7 +15,8 @@
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.spidermax32.StorySlice"
     },
     "android": {
       "adaptiveIcon": {
