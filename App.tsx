@@ -1,5 +1,5 @@
-import { useState, useRef, useMemo, useEffect } from 'react';
-import { StyleSheet, Text, View, SafeAreaView, StatusBar, Button, ScrollView, Image, Pressable, TextInput, Alert, TouchableOpacity } from 'react-native';
+import { useState, useRef, useMemo } from 'react';
+import { StyleSheet, Text, View, SafeAreaView, StatusBar, ScrollView, Image, Pressable, TextInput, Alert, TouchableOpacity } from 'react-native';
 import Share from 'react-native-share';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
@@ -241,10 +241,6 @@ export default function App() {
     if (seenVideoUris) storedVideoUrisSet(seenVideoUris)
   }
 
-  useEffect(() => {
-    console.log(`this changed`, storedVideoUris);
-
-  }, [storedVideoUris])
   const onPlaybackStatusUpdate = (status: any, seenVideoControls: videoControlsType) => {
     if (status.positionMillis >= seenVideoControls.endTime) {
       previewVideo.current.playFromPositionAsync(seenVideoControls.startTime)
@@ -282,6 +278,7 @@ export default function App() {
       return { ...prev, scale: usingOption }
     })
   }
+
   const changeTimeSmall = async (option: "back" | "forward", seenCurrentBarSelected: "start" | "end", videoRef: Video) => {
     previewVideo.current.pauseAsync()
 
