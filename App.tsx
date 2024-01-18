@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from 'react';
-import { StyleSheet, Text, View, SafeAreaView, StatusBar, ScrollView, Image, Pressable, TextInput, Alert, TouchableOpacity } from 'react-native';
+import { StyleSheet, Text, View, SafeAreaView, StatusBar, ScrollView, Image, Pressable, TextInput, Alert, TouchableOpacity, Button } from 'react-native';
 import Share from 'react-native-share';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
@@ -41,6 +41,7 @@ export default function App() {
   });
 
   const inputTimeout = useRef<NodeJS.Timeout>()
+  const smalltTimeChangeTimeout = useRef<NodeJS.Timeout>()
   const previewVideo = useRef<Video>(null!)
   const [videoControls, videoControlsSet] = useState<videoControlsType>({
     startTime: 0,
@@ -70,12 +71,15 @@ export default function App() {
   }
 
   const videoDuration = useMemo(() => {
-    if (!videoControls) return millToTime(0)
+    if (!videoControls) return 0
 
-    if (videoControls.startTime > videoControls.endTime) return millToTime(0)
+    if (videoControls.startTime > videoControls.endTime) return 0
 
-    const seenDur = videoControls.endTime - videoControls.startTime
-    return millToTime(seenDur > 0 ? seenDur : 0)
+    return videoControls.endTime - videoControls.startTime
+  }, [videoControls])
+
+  const usingAFilter = useMemo(() => {
+    return videoControls.rotate !== null || videoControls.scale !== null
   }, [videoControls])
 
   const onStartTimeChange = (startTime: number) => {
@@ -140,11 +144,23 @@ export default function App() {
     return dirInfo
   }
 
-  const checkAtDirectory = async (passedUri: string): Promise<string[] | null> => {
+  const retrieveFromDirectory = async (passedUri: string): Promise<string[] | null> => {
     try {
       const seenUris = await FileSystem.readDirectoryAsync(passedUri)
+      console.log(`$seenuris`, seenUris);
+
       if (seenUris.length === 0) return null
-      return seenUris
+
+      const sortedFileNames = seenUris
+        .filter(name => name.endsWith('.mp4')) // Filter only mp4 files
+        .sort((a, b) => {
+          const numberA = parseInt(a.match(/\d+\.mp4$/)[0], 10);
+          const numberB = parseInt(b.match(/\d+\.mp4$/)[0], 10);
+
+          return numberA - numberB;
+        })
+        .map(fileName => fileName);
+      return sortedFileNames;
 
     } catch (error) {
       console.log(`$error trying to read this direct`, error);
@@ -158,52 +174,85 @@ export default function App() {
     })
   }
 
-  const splitVideo = async (uploadedVideo: uploadedVideo, outputDir: string, seenVideoControls: videoControlsType, seenDuration: string) => {
+  const splitVideo = async (uploadedVideo: uploadedVideo, outputDir: string, seenVideoControls: videoControlsType, seenDuration: number, seenUsingAFilter: boolean) => {
     await ensureDirExists(outputDir)
     splittingVideoSet(prev => {
       return { ...prev, running: true, duration: null }
     })
 
-    const rotateFilter = seenVideoControls.rotate === null ? "" :
-      seenVideoControls.rotate === 90 ? `transpose=1,` :
-        seenVideoControls.rotate === -90 ? `transpose=2,` :
-          `rotate=PI:bilinear=0,`
-    const scaleFilter = seenVideoControls.scale === null ? "" : `scale=${seenVideoControls.scale}:-1`
+    const segmentLengthMs = seenVideoControls.amtToSegment * 1000; // Convert to milliseconds
+    const segmentLoopAmount = Math.ceil(seenDuration / segmentLengthMs) //seenduration already in milliseconds
+    const timeLeftOnLastLoop = seenDuration - (segmentLengthMs * (segmentLoopAmount - 1))
+    let runningDurationAddOn = 0;
 
-    const allFilters = `${rotateFilter}${scaleFilter}`
-    const usingAFilter = seenVideoControls.rotate !== null || seenVideoControls.scale !== null
+    if (seenUsingAFilter) {
+      const rotateFilter = seenVideoControls.rotate === null ? "" :
+        seenVideoControls.rotate === 90 ? `transpose=1,` :
+          seenVideoControls.rotate === -90 ? `transpose=2,` :
+            `rotate=PI:bilinear=0,`
+      const scaleFilter = seenVideoControls.scale === null ? "" : `scale=${seenVideoControls.scale}:-1`
+      const allFilters = `${rotateFilter}${scaleFilter}`
 
-    const finalCommand = usingAFilter ?
-      `-i ${uploadedVideo.uri} -vf "${allFilters}" -ss ${millToTime(seenVideoControls.startTime)} -t ${seenDuration} -map 0 -segment_time ${seenVideoControls.amtToSegment} -f segment -reset_timestamps 1 ${outputDir}${uploadedVideo.filename}%03d.mp4` :
-      `-i ${uploadedVideo.uri} -c copy -ss ${millToTime(seenVideoControls.startTime)} -t ${seenDuration} -map 0 -segment_time ${seenVideoControls.amtToSegment} -f segment -reset_timestamps 1 ${outputDir}${uploadedVideo.filename}%03d.mp4`
+      await Promise.all(new Array(segmentLoopAmount).fill("").map((e, eachIndex) => {
+        let calculatedSegmentTime = eachIndex === segmentLoopAmount - 1 ? timeLeftOnLastLoop : segmentLengthMs
 
-    await FFmpegKit.execute(finalCommand).then(async session => {
+        // const finalCommand = `-i ${uploadedVideo.uri} -vf "transpose=2,transpose=2,scale=1920:-1" -c:a copy ${outputDir}${uploadedVideo.filename}`;
 
-      const returnCode = await session.getReturnCode();
-      const duration = await session.getDuration();
-      const failStackTrace = await session.getFailStackTrace();
+        const finalCommand = `-i ${uploadedVideo.uri} -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * eachIndex))} -t ${millToTime(calculatedSegmentTime)} -vf "${allFilters}" -c:v libx264 -c:a copy ${outputDir}${uploadedVideo.filename}${eachIndex}.mp4`;
 
-      if (returnCode.isValueSuccess()) {
-        console.log(`Encode completed successfully in ${duration} milliseconds;`);
+        return FFmpegKit.execute(finalCommand).then(async session => {
+          const returnCode = await session.getReturnCode();
+          const duration = await session.getDuration();
+          const failStackTrace = await session.getFailStackTrace();
 
-        splittingVideoSet(prev => {
-          return { ...prev, duration: duration }
-        })
+          if (returnCode.isValueSuccess()) {
+            console.log(`Encode for ${eachIndex} completed successfully in ${duration} milliseconds;`);
 
-      } else if (returnCode.isValueCancel()) {
-        console.log('Encode canceled');
-      } else {
-        console.log(
-          `failed and rc ${returnCode}.${failStackTrace}`,
-        );
-      }
+            runningDurationAddOn += duration
+
+          } else if (returnCode.isValueCancel()) {
+            console.log('Encode canceled');
+          } else {
+            console.log(
+              `failed and rc ${returnCode}.${failStackTrace}`,
+            );
+          }
+        });
+
+      }))
+
+    } else {
+      await Promise.all(new Array(segmentLoopAmount).fill("").map((e, eachIndex) => {
+        let calculatedSegmentTime = eachIndex === segmentLoopAmount - 1 ? timeLeftOnLastLoop : segmentLengthMs
+        const finalCommand = `-loglevel error -i ${uploadedVideo.uri} -c copy -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * eachIndex))} -t ${millToTime(calculatedSegmentTime)} ${outputDir}${uploadedVideo.filename}${eachIndex}.mp4`;
+
+        return FFmpegKit.execute(finalCommand).then(async session => {
+          const returnCode = await session.getReturnCode();
+          const duration = await session.getDuration();
+          const failStackTrace = await session.getFailStackTrace();
+
+          if (returnCode.isValueSuccess()) {
+            console.log(`Encode for ${eachIndex} completed successfully in ${duration} milliseconds;`);
+            if (duration > runningDurationAddOn) runningDurationAddOn += duration;
+          } else if (returnCode.isValueCancel()) {
+            console.log('Encode canceled');
+          } else {
+            console.log(`failed and rc ${returnCode}.${failStackTrace}`);
+          }
+        });
+      }))
+    }
+
+
+    splittingVideoSet(prev => {
+      return { ...prev, duration: runningDurationAddOn }
     });
 
     setTimeout(() => {
       splittingVideoSet(prev => {
         return { ...prev, running: false }
       })
-    }, 1500);
+    }, 1000);
   };
 
   const onShare = async (seenUris: string[], seenOutputDir: string, singleShare = false) => {
@@ -232,12 +281,12 @@ export default function App() {
   };
 
   const handleWantsToSplit = async () => {
-    const prevUris = await checkAtDirectory(outputDir)
+    const prevUris = await retrieveFromDirectory(outputDir)
     if (prevUris) await deleteInDirectory(outputDir); storedVideoUrisSet([])
 
-    await splitVideo(uploadedVideoInfo, outputDir, videoControls, videoDuration)
+    await splitVideo(uploadedVideoInfo, outputDir, videoControls, videoDuration, usingAFilter)
 
-    const seenVideoUris = await checkAtDirectory(outputDir)
+    const seenVideoUris = await retrieveFromDirectory(outputDir)
     if (seenVideoUris) storedVideoUrisSet(seenVideoUris)
   }
 
@@ -280,25 +329,29 @@ export default function App() {
   }
 
   const changeTimeSmall = async (option: "back" | "forward", seenCurrentBarSelected: "start" | "end", videoRef: Video) => {
-    previewVideo.current.pauseAsync()
+    if (smalltTimeChangeTimeout.current) clearTimeout(smalltTimeChangeTimeout.current)
+    let newTime = 0
 
-    videoControlsSet(prevVideoControls => {
+    videoControlsSet((prevVideoControls) => {
       const transformDirection = option === "back" ? -100 : 100
 
       if (seenCurrentBarSelected === "start") {
-        let newTime = prevVideoControls.startTime + transformDirection
+        newTime = prevVideoControls.startTime + transformDirection
         if (newTime < 0 || newTime > prevVideoControls.endTime) newTime = prevVideoControls.startTime
 
-        videoRef.setPositionAsync(newTime)
         return { ...prevVideoControls, startTime: newTime }
       } else {
-        let newTime = prevVideoControls.endTime + transformDirection
+        newTime = prevVideoControls.endTime + transformDirection
         if (newTime > prevVideoControls.maxTime || newTime < prevVideoControls.startTime) newTime = prevVideoControls.endTime
-
-        videoRef.setPositionAsync(newTime)
         return { ...prevVideoControls, endTime: newTime }
       }
     })
+
+    smalltTimeChangeTimeout.current = setTimeout(async () => {
+      console.log(`$ran`);
+      await previewVideo.current.pauseAsync()
+      videoRef.setPositionAsync(newTime)
+    }, 500)
   }
 
   return (
@@ -321,7 +374,7 @@ export default function App() {
       <View style={{ backgroundColor: "#A6B1E1", flex: 2, flexDirection: "row", gap: 8, padding: 8, position: "relative" }}>
         <View style={{ display: showingSettings ? "flex" : "none", flex: .6, gap: 8 }}>
           <Pressable style={[styles.settingsContSmall, { justifyContent: 'center', alignItems: 'center' }]} onPress={() => changeRotation(videoControls.rotate)}>
-            <ArrowCircle height={40} width={40} rotation={videoControls.rotate === null ? 0 : videoControls.rotate === 90 ? 90 : videoControls.rotate === 180 ? 180 : 270} />
+            <ArrowCircle height={40} width={40} rotation={videoControls.rotate === null ? -90 : videoControls.rotate === 90 ? 0 : videoControls.rotate === 180 ? 90 : 180} />
           </Pressable>
 
           <View style={[styles.settingsContSmall, { justifyContent: "center", alignItems: "center", position: 'relative' }]}>
@@ -345,18 +398,18 @@ export default function App() {
         <View style={{ flex: 1.5, position: "relative", }}>
           <View style={{ display: showingSettings ? "flex" : "none", alignItems: "center" }}>
             <Text style={{ opacity: videoControls.rotate === null ? 0 : 1, textAlign: "center", fontSize: 8 }}>rotate video {videoControls.rotate === 90 ? 90 : videoControls.rotate === 180 ? 180 : 270} degrees</Text>
-            <Text>Duration: {videoDuration}s</Text>
+            <Text>Duration: {millToTime(videoDuration)}s</Text>
 
-            <Text>Move {currentBarSelected} 100ms</Text>
+            <Text>Move <Text style={{ fontWeight: "bold" }}>{currentBarSelected}</Text> 100ms</Text>
 
             <View style={{ flexDirection: "row", gap: 8 }}>
-              <Pressable style={{ backgroundColor: 'green', padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("back", currentBarSelected, previewVideo.current)}>
+              <TouchableOpacity activeOpacity={0.8} style={{ backgroundColor: '#dcd6f7', marginTop: 8, padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("back", currentBarSelected, previewVideo.current)}>
                 <Text style={{ fontWeight: "bold" }}>backward</Text>
-              </Pressable>
+              </TouchableOpacity>
 
-              <Pressable style={{ backgroundColor: 'green', padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("forward", currentBarSelected, previewVideo.current)}>
+              <TouchableOpacity activeOpacity={0.8} style={{ backgroundColor: '#dcd6f7', marginTop: 8, padding: 8, borderRadius: 8, }} onPress={() => changeTimeSmall("forward", currentBarSelected, previewVideo.current)}>
                 <Text style={{ fontWeight: "bold" }}>forward</Text>
-              </Pressable>
+              </TouchableOpacity>
             </View>
           </View>
 
@@ -383,17 +436,15 @@ export default function App() {
 
           <View style={{ transform: [{ rotate: "90deg" }], position: "absolute", top: 115, left: -65, width: 250, gap: 32 }}>
             <Slider
-              onSlidingStart={() => {
-              }}
               onSlidingComplete={async () => {
                 currentBarSelectedSet("end")
                 await previewVideo.current.pauseAsync()
                 previewVideo.current.setPositionAsync(videoControls.endTime)
-
               }}
+              step={1}
+              value={videoControls.endTime}
               minimumValue={1}
               maximumValue={videoControls.maxTime}
-              value={videoControls.endTime}
               onValueChange={onEndTimeChange}
               minimumTrackTintColor="#FFFFFF"
               maximumTrackTintColor="#000000"
@@ -408,10 +459,10 @@ export default function App() {
                 await previewVideo.current.setPositionAsync(videoControls.startTime)
                 previewVideo.current.playAsync()
               }}
-              vertical={true}
+              step={1}
+              value={videoControls.startTime}
               minimumValue={0}
               maximumValue={videoControls.maxTime}
-              value={videoControls.startTime}
               onValueChange={onStartTimeChange}
               minimumTrackTintColor="#FFFFFF"
               maximumTrackTintColor="#000000"
@@ -506,6 +557,7 @@ export default function App() {
               style={{ width: 120, height: 120, aspectRatio: "1/1", borderRadius: 8 }}
               source={require("./assets/share.png")}
             />
+            <View style={{ backgroundColor: "#dcd6f7", position: "absolute", top: 0, left: 0, right: 0, bottom: 0, transform: [{ scale: 1.05 }], zIndex: -1, borderRadius: 30 }}></View>
           </TouchableOpacity>
         )}
 

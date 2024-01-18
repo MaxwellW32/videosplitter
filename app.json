@@ -2,7 +2,7 @@
   "expo": {
     "name": "StorySlice",
     "slug": "StorySlice",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/logo.png",
     "userInterfaceStyle": "light",
@@ -45,7 +45,7 @@
       [
         "@config-plugins/ffmpeg-kit-react-native",
         {
-          "package": "video"
+          "package": "min-gpl"
         }
       ]
     ]
