@@ -1,5 +1,5 @@
-import { useState, useRef, useMemo } from 'react';
-import { StyleSheet, Text, View, SafeAreaView, StatusBar, ScrollView, Image, Pressable, TextInput, Alert, TouchableOpacity, Button } from 'react-native';
+import { useState, useRef, useMemo, useEffect } from 'react';
+import { StyleSheet, Text, View, SafeAreaView, StatusBar, ScrollView, Image, Pressable, TextInput, Alert, TouchableOpacity, Button, Platform } from 'react-native';
 import Share from 'react-native-share';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
@@ -11,7 +11,9 @@ import ArrowLeft from './components/resuables/svgs/ArrowLeft';
 import ShareSvg from './components/resuables/svgs/ShareSvg';
 import Cog from './components/resuables/svgs/Cog';
 
-const outputDir = FileSystem.documentDirectory + "split-videos/"
+const splitVideosOutputDir = FileSystem.documentDirectory + "split-videos/"
+const intermediateDir = FileSystem.documentDirectory + "intermediate/"
+
 export default function App() {
   type uploadedVideo = {
     uri: string,
@@ -22,22 +24,24 @@ export default function App() {
     endTime: number,
     currentTime: number,
     maxTime: number,
-    scale: "256" | "640" | "1280" | "1920" | null,
+    scale: "144" | "360" | "720" | "1080" | null,
     rotate: 90 | -90 | 180 | null,
     amtToSegment: number,
   }
   const [uploadedVideoInfo, uploadedVideoInfoSet] = useState<uploadedVideo | null>(null);
-  const [storedVideoUris, storedVideoUrisSet] = useState<string[]>([]);
+  const [splitVideoUris, splitVideoUrisSet] = useState<string[]>([]);
   const [currentBarSelected, currentBarSelectedSet] = useState<"start" | "end">("start");
   const [showingSettings, showingSettingsSet] = useState(false);
   const [editingSegmentTime, editingSegmentTimeSet] = useState(false);
 
-  const [loadingSplitVideo, splittingVideoSet] = useState<{
+  const [runningVideoSplitInfo, runningVideoSplitInfoSet] = useState<{
     running: boolean,
-    duration: number | null
+    duration: number | null,
+    errorSeen: string[] | null
   }>({
     running: false,
-    duration: null
+    duration: null,
+    errorSeen: null
   });
 
   const inputTimeout = useRef<NodeJS.Timeout>()
@@ -113,9 +117,11 @@ export default function App() {
     });
     if (!result.assets) return
 
+    const seenUri = result.assets[0].uri
+
     uploadedVideoInfoSet({
-      uri: result.assets[0].uri,
-      filename: result.assets[0].fileName ?? "videoToSplit"
+      uri: seenUri,
+      filename: result.assets[0].fileName ?? "splitVideo"
     })
 
     videoControlsSet(prevControls => {
@@ -133,12 +139,14 @@ export default function App() {
     const dirInfo = await FileSystem.getInfoAsync(directUri);
 
     if (!dirInfo.exists) {
-      console.log("directory doesn't exist, creating…");
+      console.log(`directory ${directUri} doesn't exist, creating…`);
       await FileSystem.makeDirectoryAsync(directUri, { intermediates: true }).then(() => {
         console.log(`$successfully created directory`);
       }).catch(error => {
         console.log(`$error creating`, error);
       });
+    } else {
+      console.log(`$directory ${directUri} confirmed`);
     }
 
     return dirInfo
@@ -147,116 +155,85 @@ export default function App() {
   const retrieveFromDirectory = async (passedUri: string): Promise<string[] | null> => {
     try {
       const seenUris = await FileSystem.readDirectoryAsync(passedUri)
-      console.log(`$seenuris`, seenUris);
-
       if (seenUris.length === 0) return null
 
-      const sortedFileNames = seenUris
-        .filter(name => name.endsWith('.mp4')) // Filter only mp4 files
-        .sort((a, b) => {
-          const numberA = parseInt(a.match(/\d+\.mp4$/)[0], 10);
-          const numberB = parseInt(b.match(/\d+\.mp4$/)[0], 10);
-
-          return numberA - numberB;
-        })
-        .map(fileName => fileName);
-      return sortedFileNames;
+      return seenUris;
 
     } catch (error) {
-      console.log(`$error trying to read this direct`, error);
+      console.log(`$error trying to read this direct ${passedUri}`, error);
       return null
     }
   }
 
   const deleteInDirectory = async (passedUri: string) => {
     await FileSystem.deleteAsync(passedUri).catch(e => {
-      console.log(`couldn't delete directory`);
+      console.log(`couldn't delete directory`, e);
     })
   }
 
   const splitVideo = async (uploadedVideo: uploadedVideo, outputDir: string, seenVideoControls: videoControlsType, seenDuration: number, seenUsingAFilter: boolean) => {
     await ensureDirExists(outputDir)
-    splittingVideoSet(prev => {
-      return { ...prev, running: true, duration: null }
+    runningVideoSplitInfoSet(prev => {
+      return { ...prev, errorSeen: null, running: true, duration: null }
     })
 
-    const segmentLengthMs = seenVideoControls.amtToSegment * 1000; // Convert to milliseconds
-    const segmentLoopAmount = Math.ceil(seenDuration / segmentLengthMs) //seenduration already in milliseconds
-    const timeLeftOnLastLoop = seenDuration - (segmentLengthMs * (segmentLoopAmount - 1))
-    let runningDurationAddOn = 0;
+    const rotateFilter = seenVideoControls.rotate === null ? "" :
+      seenVideoControls.rotate === 90 ? `transpose=1,` :
+        seenVideoControls.rotate === -90 ? `transpose=2,` :
+          `rotate=PI:bilinear=0,`
+    const scaleFilter = seenVideoControls.scale === null ? "" :
+      rotateFilter
+        ?
+        rotateFilter === "rotate=PI:bilinear=0," ? `scale=-1:${seenVideoControls.scale}` :
+          `scale=${seenVideoControls.scale}:-1`
+        :
+        `scale=-1:${seenVideoControls.scale}`
 
-    if (seenUsingAFilter) {
-      const rotateFilter = seenVideoControls.rotate === null ? "" :
-        seenVideoControls.rotate === 90 ? `transpose=1,` :
-          seenVideoControls.rotate === -90 ? `transpose=2,` :
-            `rotate=PI:bilinear=0,`
-      const scaleFilter = seenVideoControls.scale === null ? "" : `scale=${seenVideoControls.scale}:-1`
-      const allFilters = `${rotateFilter}${scaleFilter}`
+    const allFilters = `${rotateFilter}${scaleFilter}`
+    console.log(`$seenVideoControls.startTime`, seenVideoControls.startTime);
+    console.log(`$seenDuration`, seenDuration);
 
-      await Promise.all(new Array(segmentLoopAmount).fill("").map((e, eachIndex) => {
-        let calculatedSegmentTime = eachIndex === segmentLoopAmount - 1 ? timeLeftOnLastLoop : segmentLengthMs
+    const finalCommand = seenUsingAFilter ?
+      `-loglevel error -i ${uploadedVideo.uri} -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -vf "${allFilters}"  -map 0 -segment_time ${seenVideoControls.amtToSegment} -f segment -reset_timestamps 1 ${outputDir}${uploadedVideo.filename}%03d.mp4` :
+      `-loglevel error -i ${uploadedVideo.uri} -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -c copy -map 0 -segment_time ${seenVideoControls.amtToSegment} -f segment -reset_timestamps 1 ${outputDir}${uploadedVideo.filename}%03d.mp4`
 
-        // const finalCommand = `-i ${uploadedVideo.uri} -vf "transpose=2,transpose=2,scale=1920:-1" -c:a copy ${outputDir}${uploadedVideo.filename}`;
+    await FFmpegKit.execute(finalCommand).then(async session => {
 
-        const finalCommand = `-i ${uploadedVideo.uri} -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * eachIndex))} -t ${millToTime(calculatedSegmentTime)} -vf "${allFilters}" -c:v libx264 -c:a copy ${outputDir}${uploadedVideo.filename}${eachIndex}.mp4`;
+      const returnCode = await session.getReturnCode();
+      const duration = await session.getDuration();
+      const failStackTrace = await session.getFailStackTrace();
 
-        return FFmpegKit.execute(finalCommand).then(async session => {
-          const returnCode = await session.getReturnCode();
-          const duration = await session.getDuration();
-          const failStackTrace = await session.getFailStackTrace();
+      if (returnCode.isValueSuccess()) {
+        console.log(`Encode completed successfully in ${duration} milliseconds;`);
 
-          if (returnCode.isValueSuccess()) {
-            console.log(`Encode for ${eachIndex} completed successfully in ${duration} milliseconds;`);
+        runningVideoSplitInfoSet(prev => {
+          return { ...prev, duration: duration }
+        })
+      } else if (returnCode.isValueCancel()) {
+        console.log('Encode canceled');
+      } else {
+        console.log(
+          `failed and rc ${returnCode}.${failStackTrace}`,
+        );
 
-            runningDurationAddOn += duration
-
-          } else if (returnCode.isValueCancel()) {
-            console.log('Encode canceled');
-          } else {
-            console.log(
-              `failed and rc ${returnCode}.${failStackTrace}`,
-            );
-          }
-        });
-
-      }))
-
-    } else {
-      await Promise.all(new Array(segmentLoopAmount).fill("").map((e, eachIndex) => {
-        let calculatedSegmentTime = eachIndex === segmentLoopAmount - 1 ? timeLeftOnLastLoop : segmentLengthMs
-        const finalCommand = `-loglevel error -i ${uploadedVideo.uri} -c copy -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * eachIndex))} -t ${millToTime(calculatedSegmentTime)} ${outputDir}${uploadedVideo.filename}${eachIndex}.mp4`;
-
-        return FFmpegKit.execute(finalCommand).then(async session => {
-          const returnCode = await session.getReturnCode();
-          const duration = await session.getDuration();
-          const failStackTrace = await session.getFailStackTrace();
-
-          if (returnCode.isValueSuccess()) {
-            console.log(`Encode for ${eachIndex} completed successfully in ${duration} milliseconds;`);
-            if (duration > runningDurationAddOn) runningDurationAddOn += duration;
-          } else if (returnCode.isValueCancel()) {
-            console.log('Encode canceled');
-          } else {
-            console.log(`failed and rc ${returnCode}.${failStackTrace}`);
-          }
-        });
-      }))
-    }
-
-
-    splittingVideoSet(prev => {
-      return { ...prev, duration: runningDurationAddOn }
+        runningVideoSplitInfoSet(prev => {
+          return { ...prev, errorSeen: prev.errorSeen ? [...prev.errorSeen, `failed and rc ${returnCode}.${failStackTrace}`] : [`failed and rc ${returnCode}.${failStackTrace}`] }
+        })
+      }
     });
 
     setTimeout(() => {
-      splittingVideoSet(prev => {
-        return { ...prev, running: false }
+      runningVideoSplitInfoSet(prev => {
+        if (prev.errorSeen !== null) {
+          return prev
+        } else {
+          return { ...prev, running: false }
+        }
       })
     }, 1000);
   };
 
   const onShare = async (seenUris: string[], seenOutputDir: string, singleShare = false) => {
-    if (seenUris.length === 0) return
 
     if (singleShare) {
       const shareResponse = await Share.open({
@@ -281,13 +258,19 @@ export default function App() {
   };
 
   const handleWantsToSplit = async () => {
-    const prevUris = await retrieveFromDirectory(outputDir)
-    if (prevUris) await deleteInDirectory(outputDir); storedVideoUrisSet([])
+    //reset clean
+    const prevVideoUris = await retrieveFromDirectory(splitVideosOutputDir)
+    if (prevVideoUris) await deleteInDirectory(splitVideosOutputDir);
 
-    await splitVideo(uploadedVideoInfo, outputDir, videoControls, videoDuration, usingAFilter)
+    const prevIntermeditaeUris = await retrieveFromDirectory(intermediateDir)
+    if (prevIntermeditaeUris) {
+      await deleteInDirectory(intermediateDir)
+    }
 
-    const seenVideoUris = await retrieveFromDirectory(outputDir)
-    if (seenVideoUris) storedVideoUrisSet(seenVideoUris)
+    await splitVideo(uploadedVideoInfo, splitVideosOutputDir, videoControls, videoDuration, usingAFilter)
+
+    const seenSplitVideoUris = await retrieveFromDirectory(splitVideosOutputDir)
+    splitVideoUrisSet(seenSplitVideoUris)
   }
 
   const onPlaybackStatusUpdate = (status: any, seenVideoControls: videoControlsType) => {
@@ -307,8 +290,8 @@ export default function App() {
     })
   }
 
-  const changeResolution = (option: "256" | "640" | "1280" | "1920" | null, direction: "left" | "right") => {
-    const optionsArr = ["256", "640", "1280", "1920", null]
+  const changeResolution = (option: "144" | "360" | "720" | "1080" | null, direction: "left" | "right") => {
+    const optionsArr = ["144", "360", "720", "1080", null]
     const foundIndex = optionsArr.findIndex(each => each === option)
     let usingOption = null
     let newIndex = 0
@@ -348,7 +331,6 @@ export default function App() {
     })
 
     smalltTimeChangeTimeout.current = setTimeout(async () => {
-      console.log(`$ran`);
       await previewVideo.current.pauseAsync()
       videoRef.setPositionAsync(newTime)
     }, 500)
@@ -382,7 +364,7 @@ export default function App() {
               <ArrowLeft height={40} width={40} />
             </Pressable>
 
-            <Text style={{}}>{videoControls.scale === null ? "Native" : `${videoControls.scale === "1920" ? "1080" : videoControls.scale === "1280" ? "720" : videoControls.scale === "640" ? "360" : "144"}p`}</Text>
+            <Text style={{}}>{videoControls.scale === null ? "Native" : `${videoControls.scale}p`}</Text>
 
             <Pressable style={{}} onPress={() => { changeResolution(videoControls.scale, "right") }}>
               <ArrowLeft height={40} width={40} rotation={180} />
@@ -391,6 +373,7 @@ export default function App() {
 
           <Pressable onPress={() => { editingSegmentTimeSet(true) }} style={[styles.settingsContSmall, { justifyContent: "center", alignItems: "center", position: 'relative' }]}>
             <Text style={{ fontWeight: "bold" }}>{isNaN(videoControls.amtToSegment) ? "" : `${videoControls.amtToSegment}s`}</Text>
+
             <Text style={{ fontWeight: "bold" }}>split</Text>
           </Pressable>
         </View>
@@ -510,14 +493,42 @@ export default function App() {
           </Pressable>
         )}
 
-        {loadingSplitVideo.running && (
+        {runningVideoSplitInfo.running && (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "center", alignItems: 'center', backgroundColor: "rgba(0,0,0,0.2)" }}>
-            <View style={{ backgroundColor: "#fff", padding: 32, gap: 8 }}>
+            <View style={{ backgroundColor: "#fff", padding: 32, gap: 8, }}>
               <Text>
-                {loadingSplitVideo.duration ? `Completed in ${loadingSplitVideo.duration / 1000}s` : `Loading...`}
+                {runningVideoSplitInfo.duration ? `Completed in ${runningVideoSplitInfo.duration / 1000}s` : `Loading...`}
               </Text>
 
               <Text style={{ fontSize: 8, maxWidth: 100 }}>Note - scaling/rotating the video will take longer to process.</Text>
+
+              {usingAFilter && (
+                <Text style={{ fontSize: 8, maxWidth: 100 }}>Est. time to process {(((videoDuration / 1000) / 60) * 2.2).toFixed(1)} mintues</Text>
+              )}
+
+              {runningVideoSplitInfo.errorSeen && (
+                <View>
+                  <Button title='Close' color={"#A6B1E1"} onPress={() => {
+                    runningVideoSplitInfoSet(prev => {
+                      return { ...prev, running: false }
+                    })
+                  }} />
+
+                  <Text>Errors Seen</Text>
+
+                  <View>
+                    {runningVideoSplitInfo.errorSeen.map((eachError, eachErrorIndex) => {
+                      return (
+                        <Text key={eachErrorIndex}>
+                          {eachError}
+                        </Text>
+                      )
+                    })}
+                  </View>
+
+                  <Button title='Try again' color={"#A6B1E1"} onPress={handleWantsToSplit} />
+                </View>
+              )}
             </View>
           </View>
         )}
@@ -525,16 +536,18 @@ export default function App() {
 
       <View style={{ flex: 1.5 }}>
         <ScrollView horizontal style={{ flex: 1 }}>
-          {storedVideoUris.map(eachVideoUri => {
+          {splitVideoUris.map((eachUri, eachUriIndex) => {
+
             return (
-              <View key={eachVideoUri} style={{ backgroundColor: "#a6b1e1", flex: 1, width: 300, margin: 16, marginLeft: 0 }}>
-                <Pressable style={{ margin: 8, marginLeft: "auto" }} onPress={() => { onShare([eachVideoUri], outputDir, true) }}>
+              <View key={eachUriIndex} style={{ backgroundColor: "#a6b1e1", flex: 1, width: 300, margin: 16, marginLeft: 0 }}>
+                <TouchableOpacity style={{ marginLeft: "auto", padding: 8 }} onPress={() => { onShare([eachUri], splitVideosOutputDir, true) }}>
                   <ShareSvg width={20} height={20} />
-                </Pressable>
+                </TouchableOpacity>
+
 
                 <Video
                   style={{ height: 150, flex: 1 }}
-                  source={{ uri: outputDir + eachVideoUri }}
+                  source={{ uri: splitVideosOutputDir + eachUri }}
                   useNativeControls
                   resizeMode={ResizeMode.CONTAIN}
                 />
@@ -551,8 +564,8 @@ export default function App() {
           </TouchableOpacity>
         )}
 
-        {storedVideoUris.length > 0 && (
-          <TouchableOpacity activeOpacity={0.8} style={{ position: "relative", top: -40 }} onPress={() => { onShare(storedVideoUris, outputDir) }}>
+        {splitVideoUris.length > 0 && (
+          <TouchableOpacity activeOpacity={0.8} style={{ position: "relative", top: -40 }} onPress={() => { onShare(splitVideoUris, splitVideosOutputDir) }}>
             <Image
               style={{ width: 120, height: 120, aspectRatio: "1/1", borderRadius: 8 }}
               source={require("./assets/share.png")}
