@@ -12,7 +12,7 @@ import ShareSvg from './components/resuables/svgs/ShareSvg';
 import Cog from './components/resuables/svgs/Cog';
 
 const splitVideosOutputDir = FileSystem.documentDirectory + "split-videos/"
-const intermediateDir = FileSystem.documentDirectory + "intermediate/"
+const intermediateOutputDir = FileSystem.documentDirectory + "intermediate/"
 
 export default function App() {
   type uploadedVideo = {
@@ -171,74 +171,77 @@ export default function App() {
     })
   }
 
-  const splitVideo = async (uploadedVideo: uploadedVideo, outputDir: string, seenVideoControls: videoControlsType, seenDuration: number, seenUsingAFilter: boolean) => {
-    await ensureDirExists(outputDir)
-    runningVideoSplitInfoSet(prev => {
-      return { ...prev, errorSeen: null, running: true, duration: null }
-    })
-
-    const rotateFilter = seenVideoControls.rotate === null ? "" :
-      seenVideoControls.rotate === 90 ? `transpose=1,` :
-        seenVideoControls.rotate === -90 ? `transpose=2,` :
-          `rotate=PI:bilinear=0,`
-    const scaleFilter = seenVideoControls.scale === null ? "" :
-      rotateFilter
-        ?
-        rotateFilter === "rotate=PI:bilinear=0," ? `scale=-1:${seenVideoControls.scale}` :
-          `scale=${seenVideoControls.scale}:-1`
-        :
-        `scale=-1:${seenVideoControls.scale}`
-
-    const allFilters = `${rotateFilter}${scaleFilter}`
-    console.log(`$seenVideoControls.startTime`, seenVideoControls.startTime);
-    console.log(`$seenDuration`, seenDuration);
-
-    const finalCommand = seenUsingAFilter ?
-      `-loglevel error -i ${uploadedVideo.uri} -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -vf "${allFilters}"  -map 0 -segment_time ${seenVideoControls.amtToSegment} -f segment -reset_timestamps 1 ${outputDir}${uploadedVideo.filename}%03d.mp4` :
-      `-loglevel error -i ${uploadedVideo.uri} -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -c copy -map 0 -segment_time ${seenVideoControls.amtToSegment} -f segment -reset_timestamps 1 ${outputDir}${uploadedVideo.filename}%03d.mp4`
-
-    await FFmpegKit.execute(finalCommand).then(async session => {
-
-      const returnCode = await session.getReturnCode();
-      const duration = await session.getDuration();
-      const failStackTrace = await session.getFailStackTrace();
-
-      if (returnCode.isValueSuccess()) {
-        console.log(`Encode completed successfully in ${duration} milliseconds;`);
-
-        runningVideoSplitInfoSet(prev => {
-          return { ...prev, duration: duration }
-        })
-      } else if (returnCode.isValueCancel()) {
-        console.log('Encode canceled');
-      } else {
-        console.log(
-          `failed and rc ${returnCode}.${failStackTrace}`,
-        );
-
-        runningVideoSplitInfoSet(prev => {
-          return { ...prev, errorSeen: prev.errorSeen ? [...prev.errorSeen, `failed and rc ${returnCode}.${failStackTrace}`] : [`failed and rc ${returnCode}.${failStackTrace}`] }
-        })
-      }
-    });
-
-    setTimeout(() => {
+  const splitVideo = async (uploadedVideo: uploadedVideo, seenOutputDir: string, seenIntermediateDir: string, seenVideoControls: videoControlsType, seenDuration: number, seenUsingAFilter: boolean) => {
+    try {
+      await ensureDirExists(seenOutputDir)
       runningVideoSplitInfoSet(prev => {
-        if (prev.errorSeen !== null) {
-          return prev
-        } else {
-          return { ...prev, running: false }
-        }
+        return { ...prev, errorSeen: null, running: true, duration: null }
       })
-    }, 1000);
+
+      const rotateFilter = seenVideoControls.rotate === null ? "" :
+        seenVideoControls.rotate === 90 ? `transpose=1,` :
+          seenVideoControls.rotate === -90 ? `transpose=2,` :
+            `rotate=PI:bilinear=0,`
+      const scaleFilter = seenVideoControls.scale === null ? "" :
+        rotateFilter
+          ?
+          rotateFilter === "rotate=PI:bilinear=0," ? `scale=-1:${seenVideoControls.scale}` :
+            `scale=${seenVideoControls.scale}:-1`
+          :
+          `scale=-1:${seenVideoControls.scale}`
+
+      const allFilters = `${rotateFilter}${scaleFilter}`
+
+      const adjustedSegmentTime = seenVideoControls.amtToSegment > 1 ? seenVideoControls.amtToSegment - 1 : seenVideoControls.amtToSegment
+
+      const finalCommand = seenUsingAFilter ?
+        `-loglevel error -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c:v libx264 -crf 18 -vf "${allFilters}" -map 0 -segment_time ${adjustedSegmentTime} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4` :
+        `-loglevel error -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c copy -map 0 -segment_time ${seenVideoControls.amtToSegment} -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4`
+
+      await FFmpegKit.execute(finalCommand).then(async session => {
+        const returnCode = await session.getReturnCode();
+        const duration = await session.getDuration();
+        const failStackTrace = await session.getFailStackTrace();
+
+        if (returnCode.isValueSuccess()) {
+          console.log(`Encode completed successfully in ${duration} milliseconds;`);
+
+          runningVideoSplitInfoSet(prev => {
+            return { ...prev, duration: duration }
+          })
+        } else if (returnCode.isValueCancel()) {
+          console.log('Encode canceled');
+        } else {
+          console.log(
+            `failed and rc ${returnCode}.${failStackTrace}`,
+          );
+
+          runningVideoSplitInfoSet(prev => {
+            return { ...prev, errorSeen: prev.errorSeen ? [...prev.errorSeen, `failed and rc ${returnCode}.${failStackTrace}`] : [`failed and rc ${returnCode}.${failStackTrace}`] }
+          })
+        }
+      });
+
+      setTimeout(() => {
+        runningVideoSplitInfoSet(prev => {
+          if (prev.errorSeen !== null) {
+            return prev
+          } else {
+            return { ...prev, running: false }
+          }
+        })
+      }, 1000);
+    } catch (error) {
+      console.log(`$error splitting vid`, error);
+    }
   };
 
-  const onShare = async (seenUris: string[], seenOutputDir: string, singleShare = false) => {
+  const onShare = async (seenUris: string[], singleShare = false) => {
+    if (seenUris.length === 0) return
 
     if (singleShare) {
       const shareResponse = await Share.open({
-        url: seenOutputDir + seenUris[0],
-        message: "Share your video",
+        url: seenUris[0],
       })
 
       if (shareResponse.success) {
@@ -247,8 +250,7 @@ export default function App() {
 
     } else {
       const shareResponse = await Share.open({
-        urls: seenUris.map(e => seenOutputDir + e),
-        message: "Share your videos"
+        urls: seenUris,
       })
 
       if (shareResponse.success) {
@@ -260,14 +262,18 @@ export default function App() {
   const handleWantsToSplit = async () => {
     //reset clean
     const prevVideoUris = await retrieveFromDirectory(splitVideosOutputDir)
-    if (prevVideoUris) await deleteInDirectory(splitVideosOutputDir);
-
-    const prevIntermeditaeUris = await retrieveFromDirectory(intermediateDir)
-    if (prevIntermeditaeUris) {
-      await deleteInDirectory(intermediateDir)
+    if (prevVideoUris) {
+      await deleteInDirectory(splitVideosOutputDir);
+      splitVideoUrisSet([]);
     }
 
-    await splitVideo(uploadedVideoInfo, splitVideosOutputDir, videoControls, videoDuration, usingAFilter)
+    const prevIntermediateUris = await retrieveFromDirectory(intermediateOutputDir)
+    if (prevIntermediateUris) {
+      await deleteInDirectory(intermediateOutputDir);
+    }
+
+    //split video
+    await splitVideo(uploadedVideoInfo, splitVideosOutputDir, intermediateOutputDir, videoControls, videoDuration, usingAFilter)
 
     const seenSplitVideoUris = await retrieveFromDirectory(splitVideosOutputDir)
     splitVideoUrisSet(seenSplitVideoUris)
@@ -540,7 +546,7 @@ export default function App() {
 
             return (
               <View key={eachUriIndex} style={{ backgroundColor: "#a6b1e1", flex: 1, width: 300, margin: 16, marginLeft: 0 }}>
-                <TouchableOpacity style={{ marginLeft: "auto", padding: 8 }} onPress={() => { onShare([eachUri], splitVideosOutputDir, true) }}>
+                <TouchableOpacity style={{ marginLeft: "auto", padding: 8 }} onPress={() => { onShare([splitVideosOutputDir + eachUri], true) }}>
                   <ShareSvg width={20} height={20} />
                 </TouchableOpacity>
 
@@ -565,7 +571,7 @@ export default function App() {
         )}
 
         {splitVideoUris.length > 0 && (
-          <TouchableOpacity activeOpacity={0.8} style={{ position: "relative", top: -40 }} onPress={() => { onShare(splitVideoUris, splitVideosOutputDir) }}>
+          <TouchableOpacity activeOpacity={0.8} style={{ position: "relative", top: -40 }} onPress={() => { onShare(splitVideoUris.map(eachUri => splitVideosOutputDir + eachUri)) }}>
             <Image
               style={{ width: 120, height: 120, aspectRatio: "1/1", borderRadius: 8 }}
               source={require("./assets/share.png")}

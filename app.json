@@ -23,10 +23,7 @@
         "foregroundImage": "./assets/logo.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.spidermax32.StorySlice",
-      "permissions": [
-        "android.permission.READ_EXTERNAL_STORAGE"
-      ]
+      "package": "com.spidermax32.StorySlice"
     },
     "web": {
       "favicon": "./assets/logo.png"
@@ -49,14 +46,6 @@
         "@config-plugins/ffmpeg-kit-react-native",
         {
           "package": "min-gpl"
-        }
-      ],
-      [
-        "expo-media-library",
-        {
-          "photosPermission": "Allow StorySlice to access your photos.",
-          "savePhotosPermission": "Allow StorySlice to save photos.",
-          "isAccessMediaLocationEnabled": true
         }
       ]
     ]
