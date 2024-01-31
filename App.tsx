@@ -57,7 +57,7 @@ export default function App() {
     maxTime: 0,
     scale: null,
     rotate: null,
-    amtToSegment: 30,
+    amtToSegment: 20,
   })
 
   const millToTime = (milliseconds: number) => {
@@ -197,16 +197,20 @@ export default function App() {
 
       const adjustedSegmentTime = seenVideoControls.amtToSegment > 1 ? seenVideoControls.amtToSegment - 1 : seenVideoControls.amtToSegment
 
-      //old no filter -loglevel error -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c copy -map 0 -segment_time ${seenVideoControls.amtToSegment} -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4
       const finalCommand = seenUsingAFilter ?
-        `-ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c:v libx264 -crf 18 -vf "${allFilters}" -map 0 -segment_time ${adjustedSegmentTime} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4` :
-        `-ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} ${seenSplitMode === "fast" ? "-c copy" : "-c:v libx264 -crf 18"} -map 0 -segment_time ${seenVideoControls.amtToSegment} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4`
+        `-loglevel info -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c:v libx264 -crf 18 -vf "${allFilters}" -map 0 -segment_time ${adjustedSegmentTime} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4` :
+        `-loglevel info -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} ${seenSplitMode === "fast" ? "-c copy" : "-c:v libx264 -crf 18"} -map 0 -segment_time ${seenVideoControls.amtToSegment} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4`
 
-      // FFmpegKitConfig.enableLogCallback(message => {
-      //   runningVideoSplitInfoSet(prevInfo => {
-      //     return { ...prevInfo, messages: [`${message.getMessage()}`] }
-      //   })
-      // });
+      FFmpegKitConfig.enableLogCallback(log => {
+        const message = log.getMessage()
+
+        if (message.includes("frame")) {
+
+          runningVideoSplitInfoSet(prevInfo => {
+            return { ...prevInfo, messages: [`${message}`] }
+          })
+        }
+      });
 
       await FFmpegKit.execute(finalCommand).then(async session => {
         const returnCode = await session.getReturnCode();
@@ -519,24 +523,16 @@ export default function App() {
 
         {runningVideoSplitInfo.running && (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "center", alignItems: 'center', backgroundColor: "rgba(0,0,0,0.2)" }}>
-            <View style={{ backgroundColor: "#fff", width: "60%", height: "80%", padding: 32, gap: 8, }}>
+            <View style={{ backgroundColor: "#fff", width: "60%", padding: 32, gap: 8, }}>
               <Text>{runningVideoSplitInfo.duration ? `Completed in ${runningVideoSplitInfo.duration / 1000}s` : `Loading...`}</Text>
 
-              <Text style={{ fontSize: 8, maxWidth: 100 }}>Note - scaling/rotating the video will take longer to process.</Text>
+              <Text style={{ fontSize: 8 }}>Note - scaling/rotating the video will take longer to process.</Text>
 
-              {usingAFilter && (
-                <Text style={{ fontSize: 8, maxWidth: 100 }}>Est. time to process {(((videoDuration / 1000) / 60) * 2.2).toFixed(1)} mintues</Text>
+              {(usingAFilter || splitMode === "precise") && (
+                <Text style={{ fontSize: 8 }}>Est. time to process {(((videoDuration / 1000) / 60) * 2.2).toFixed(1)} mintues</Text>
               )}
 
-              <ScrollView style={{ maxHeight: 100, overflow: 'scroll' }}>
-                <Text>{runningVideoSplitInfo.messages.length === 0 && "..."}</Text>
-
-                {runningVideoSplitInfo.messages.map((eachMessage, eachMessageIndex) => {
-                  return (
-                    <Text key={eachMessageIndex} style={{ fontSize: 8 }}>{eachMessage}</Text>
-                  )
-                })}
-              </ScrollView>
+              <Text style={{ fontSize: 8, minHeight: 30 }}>{runningVideoSplitInfo.messages[0]}</Text>
 
               <Button title='Cancel' color={"#A6B1E1"} onPress={() => {
                 FFmpegKit.cancel()
