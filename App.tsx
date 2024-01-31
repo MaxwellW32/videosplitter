@@ -4,7 +4,7 @@ import Share from 'react-native-share';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { Video, ResizeMode } from 'expo-av';
-import { FFmpegKit } from 'ffmpeg-kit-react-native';
+import { FFmpegKit, FFmpegKitConfig } from 'ffmpeg-kit-react-native';
 import Slider from '@react-native-community/slider';
 import ArrowCircle from './components/resuables/svgs/ArrowCircle';
 import ArrowLeft from './components/resuables/svgs/ArrowLeft';
@@ -33,15 +33,18 @@ export default function App() {
   const [currentBarSelected, currentBarSelectedSet] = useState<"start" | "end">("start");
   const [showingSettings, showingSettingsSet] = useState(false);
   const [editingSegmentTime, editingSegmentTimeSet] = useState(false);
+  const [splitMode, splitModeSet] = useState<"fast" | "precise">("fast");
 
   const [runningVideoSplitInfo, runningVideoSplitInfoSet] = useState<{
     running: boolean,
     duration: number | null,
-    errorSeen: string[] | null
+    errorSeen: string[] | null,
+    messages: string[]
   }>({
     running: false,
     duration: null,
-    errorSeen: null
+    errorSeen: null,
+    messages: []
   });
 
   const inputTimeout = useRef<NodeJS.Timeout>()
@@ -171,12 +174,18 @@ export default function App() {
     })
   }
 
-  const splitVideo = async (uploadedVideo: uploadedVideo, seenOutputDir: string, seenIntermediateDir: string, seenVideoControls: videoControlsType, seenDuration: number, seenUsingAFilter: boolean) => {
+  const splitVideo = async (uploadedVideo: uploadedVideo, seenOutputDir: string, seenSplitMode: string, seenVideoControls: videoControlsType, seenDuration: number, seenUsingAFilter: boolean) => {
     try {
       await ensureDirExists(seenOutputDir)
       runningVideoSplitInfoSet(prev => {
-        return { ...prev, errorSeen: null, running: true, duration: null }
+        return { ...prev, errorSeen: null, running: true, duration: null, messages: [] }
       })
+
+      const segmentLengthMs = seenVideoControls.amtToSegment * 1000;
+      const amtToLoop = Math.ceil(seenDuration / segmentLengthMs) //seenduration already in milliseconds
+      const timeLeftOnLastLoop = seenDuration - (segmentLengthMs * (amtToLoop - 1))
+
+      let runningDurationAddOn = 0;
 
       const rotateFilter = seenVideoControls.rotate === null ? "" :
         seenVideoControls.rotate === 90 ? `transpose=1,` :
@@ -192,34 +201,35 @@ export default function App() {
 
       const allFilters = `${rotateFilter}${scaleFilter}`
 
-      const adjustedSegmentTime = seenVideoControls.amtToSegment > 1 ? seenVideoControls.amtToSegment - 1 : seenVideoControls.amtToSegment
+      for (let index = 0; index < amtToLoop; index++) {
+        const calculatedSegmentTime = index === amtToLoop - 1 ? timeLeftOnLastLoop : segmentLengthMs
 
-      const finalCommand = seenUsingAFilter ?
-        `-loglevel error -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c:v libx264 -crf 18 -vf "${allFilters}" -map 0 -segment_time ${adjustedSegmentTime} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4` :
-        `-loglevel error -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c copy -map 0 -segment_time ${seenVideoControls.amtToSegment} -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4`
+        const finalCommand = seenUsingAFilter ?
+          `-loglevel error -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * index))} -t ${millToTime(calculatedSegmentTime)} -i ${uploadedVideo.uri} -c:v libx264 -crf 18 -vf "${allFilters}" ${seenOutputDir}${uploadedVideo.filename}${index + 1}.mp4` :
+          `-loglevel error -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * index))} -t ${millToTime(calculatedSegmentTime)} -i ${uploadedVideo.uri} -c copy ${seenOutputDir}${uploadedVideo.filename}${index + 1}.mp4`
 
-      await FFmpegKit.execute(finalCommand).then(async session => {
-        const returnCode = await session.getReturnCode();
-        const duration = await session.getDuration();
-        const failStackTrace = await session.getFailStackTrace();
+        await FFmpegKit.execute(finalCommand).then(async session => {
+          const returnCode = await session.getReturnCode();
+          const duration = await session.getDuration();
+          const failStackTrace = await session.getFailStackTrace();
 
-        if (returnCode.isValueSuccess()) {
-          console.log(`Encode completed successfully in ${duration} milliseconds;`);
+          if (returnCode.isValueSuccess()) {
+            console.log(`Encode for video ${index + 1} completed successfully in ${duration} milliseconds`);
+            runningDurationAddOn += duration;
+          } else if (returnCode.isValueCancel()) {
+            console.log('Encode canceled');
+          } else {
+            console.log(`failed and rc ${returnCode}.${failStackTrace}`);
 
-          runningVideoSplitInfoSet(prev => {
-            return { ...prev, duration: duration }
-          })
-        } else if (returnCode.isValueCancel()) {
-          console.log('Encode canceled');
-        } else {
-          console.log(
-            `failed and rc ${returnCode}.${failStackTrace}`,
-          );
+            runningVideoSplitInfoSet(prev => {
+              return { ...prev, errorSeen: prev.errorSeen ? [...prev.errorSeen, `failed for video ${index + 1} and rc ${returnCode}.${failStackTrace}`] : [`failed for video ${index + 1} and  rc ${returnCode}.${failStackTrace}`] }
+            });
+          }
+        })
+      }
 
-          runningVideoSplitInfoSet(prev => {
-            return { ...prev, errorSeen: prev.errorSeen ? [...prev.errorSeen, `failed and rc ${returnCode}.${failStackTrace}`] : [`failed and rc ${returnCode}.${failStackTrace}`] }
-          })
-        }
+      runningVideoSplitInfoSet(prev => {
+        return { ...prev, duration: runningDurationAddOn }
       });
 
       setTimeout(() => {
@@ -273,7 +283,7 @@ export default function App() {
     }
 
     //split video
-    await splitVideo(uploadedVideoInfo, splitVideosOutputDir, intermediateOutputDir, videoControls, videoDuration, usingAFilter)
+    await splitVideo(uploadedVideoInfo, splitVideosOutputDir, splitMode, videoControls, videoDuration, usingAFilter)
 
     const seenSplitVideoUris = await retrieveFromDirectory(splitVideosOutputDir)
     splitVideoUrisSet(seenSplitVideoUris)
@@ -370,7 +380,7 @@ export default function App() {
               <ArrowLeft height={40} width={40} />
             </Pressable>
 
-            <Text style={{}}>{videoControls.scale === null ? "Native" : `${videoControls.scale}p`}</Text>
+            <Text>{videoControls.scale === null ? "Native" : `${videoControls.scale}p`}</Text>
 
             <Pressable style={{}} onPress={() => { changeResolution(videoControls.scale, "right") }}>
               <ArrowLeft height={40} width={40} rotation={180} />
@@ -403,15 +413,23 @@ export default function App() {
           </View>
 
           {uploadedVideoInfo ? (
-            <Video
-              style={{ flex: 1 }}
-              ref={previewVideo}
-              source={{ uri: uploadedVideoInfo.uri }}
-              useNativeControls
-              resizeMode={ResizeMode.CONTAIN}
-              isLooping
-              onPlaybackStatusUpdate={(e) => { onPlaybackStatusUpdate(e, videoControls) }}
-            />
+            <>
+              <Video
+                style={{ flex: 1 }}
+                ref={previewVideo}
+                source={{ uri: uploadedVideoInfo.uri }}
+                useNativeControls
+                resizeMode={ResizeMode.CONTAIN}
+                isLooping
+                onPlaybackStatusUpdate={(e) => { onPlaybackStatusUpdate(e, videoControls) }}
+              />
+
+              {!usingAFilter && showingSettings && (
+                <TouchableOpacity style={{ backgroundColor: "#dcd6f7", borderRadius: 8, paddingVertical: 8, paddingHorizontal: 16, marginBottom: 8, alignSelf: "center" }} activeOpacity={0.8} onPress={() => splitModeSet(prev => prev === "fast" ? "precise" : "fast")}>
+                  <Text style={{ fontWeight: "bold", textAlign: 'center', textTransform: "capitalize" }}>{splitMode} Mode</Text>
+                </TouchableOpacity>
+              )}
+            </>
           ) : (
             <View style={{ alignItems: "center", justifyContent: "center", flex: 1 }}>
               <Text style={{ fontSize: 30, fontWeight: "bold", color: "#fff" }}>Get Started</Text>
@@ -501,16 +519,31 @@ export default function App() {
 
         {runningVideoSplitInfo.running && (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "center", alignItems: 'center', backgroundColor: "rgba(0,0,0,0.2)" }}>
-            <View style={{ backgroundColor: "#fff", padding: 32, gap: 8, }}>
-              <Text>
-                {runningVideoSplitInfo.duration ? `Completed in ${runningVideoSplitInfo.duration / 1000}s` : `Loading...`}
-              </Text>
+            <View style={{ backgroundColor: "#fff", width: "60%", height: "80%", padding: 32, gap: 8, }}>
+              <Text>{runningVideoSplitInfo.duration ? `Completed in ${runningVideoSplitInfo.duration / 1000}s` : `Loading...`}</Text>
 
               <Text style={{ fontSize: 8, maxWidth: 100 }}>Note - scaling/rotating the video will take longer to process.</Text>
 
               {usingAFilter && (
                 <Text style={{ fontSize: 8, maxWidth: 100 }}>Est. time to process {(((videoDuration / 1000) / 60) * 2.2).toFixed(1)} mintues</Text>
               )}
+
+              <ScrollView style={{ maxHeight: 100, overflow: 'scroll' }}>
+                <Text>{runningVideoSplitInfo.messages.length === 0 && "..."}</Text>
+
+                {runningVideoSplitInfo.messages.map((eachMessage, eachMessageIndex) => {
+                  return (
+                    <Text key={eachMessageIndex} style={{ fontSize: 8 }}>{eachMessage}</Text>
+                  )
+                })}
+              </ScrollView>
+
+              <Button title='Cancel' color={"#A6B1E1"} onPress={() => {
+                FFmpegKit.cancel()
+                runningVideoSplitInfoSet(prev => {
+                  return { ...prev, running: false }
+                })
+              }} />
 
               {runningVideoSplitInfo.errorSeen && (
                 <View>
