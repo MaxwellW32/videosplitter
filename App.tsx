@@ -181,12 +181,6 @@ export default function App() {
         return { ...prev, errorSeen: null, running: true, duration: null, messages: [] }
       })
 
-      const segmentLengthMs = seenVideoControls.amtToSegment * 1000;
-      const amtToLoop = Math.ceil(seenDuration / segmentLengthMs) //seenduration already in milliseconds
-      const timeLeftOnLastLoop = seenDuration - (segmentLengthMs * (amtToLoop - 1))
-
-      let runningDurationAddOn = 0;
-
       const rotateFilter = seenVideoControls.rotate === null ? "" :
         seenVideoControls.rotate === 90 ? `transpose=1,` :
           seenVideoControls.rotate === -90 ? `transpose=2,` :
@@ -201,35 +195,41 @@ export default function App() {
 
       const allFilters = `${rotateFilter}${scaleFilter}`
 
-      for (let index = 0; index < amtToLoop; index++) {
-        const calculatedSegmentTime = index === amtToLoop - 1 ? timeLeftOnLastLoop : segmentLengthMs
+      const adjustedSegmentTime = seenVideoControls.amtToSegment > 1 ? seenVideoControls.amtToSegment - 1 : seenVideoControls.amtToSegment
 
-        const finalCommand = seenUsingAFilter ?
-          `-loglevel error -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * index))} -t ${millToTime(calculatedSegmentTime)} -i ${uploadedVideo.uri} -c:v libx264 -crf 18 -vf "${allFilters}" ${seenOutputDir}${uploadedVideo.filename}${index + 1}.mp4` :
-          `-loglevel error -ss ${millToTime(seenVideoControls.startTime + (segmentLengthMs * index))} -t ${millToTime(calculatedSegmentTime)} -i ${uploadedVideo.uri} -c copy ${seenOutputDir}${uploadedVideo.filename}${index + 1}.mp4`
+      //old no filter -loglevel error -ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c copy -map 0 -segment_time ${seenVideoControls.amtToSegment} -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4
+      const finalCommand = seenUsingAFilter ?
+        `-ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} -c:v libx264 -crf 18 -vf "${allFilters}" -map 0 -segment_time ${adjustedSegmentTime} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4` :
+        `-ss ${millToTime(seenVideoControls.startTime)} -t ${millToTime(seenDuration)} -i ${uploadedVideo.uri} ${seenSplitMode === "fast" ? "-c copy" : "-c:v libx264 -crf 18"} -map 0 -segment_time ${seenVideoControls.amtToSegment} -g ${adjustedSegmentTime} -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*${adjustedSegmentTime})" -reset_timestamps 1 -f segment ${seenOutputDir}${uploadedVideo.filename}%03d.mp4`
 
-        await FFmpegKit.execute(finalCommand).then(async session => {
-          const returnCode = await session.getReturnCode();
-          const duration = await session.getDuration();
-          const failStackTrace = await session.getFailStackTrace();
+      // FFmpegKitConfig.enableLogCallback(message => {
+      //   runningVideoSplitInfoSet(prevInfo => {
+      //     return { ...prevInfo, messages: [`${message.getMessage()}`] }
+      //   })
+      // });
 
-          if (returnCode.isValueSuccess()) {
-            console.log(`Encode for video ${index + 1} completed successfully in ${duration} milliseconds`);
-            runningDurationAddOn += duration;
-          } else if (returnCode.isValueCancel()) {
-            console.log('Encode canceled');
-          } else {
-            console.log(`failed and rc ${returnCode}.${failStackTrace}`);
+      await FFmpegKit.execute(finalCommand).then(async session => {
+        const returnCode = await session.getReturnCode();
+        const duration = await session.getDuration();
+        const failStackTrace = await session.getFailStackTrace();
 
-            runningVideoSplitInfoSet(prev => {
-              return { ...prev, errorSeen: prev.errorSeen ? [...prev.errorSeen, `failed for video ${index + 1} and rc ${returnCode}.${failStackTrace}`] : [`failed for video ${index + 1} and  rc ${returnCode}.${failStackTrace}`] }
-            });
-          }
-        })
-      }
+        if (returnCode.isValueSuccess()) {
+          console.log(`Encode completed successfully in ${duration} milliseconds;`);
 
-      runningVideoSplitInfoSet(prev => {
-        return { ...prev, duration: runningDurationAddOn }
+          runningVideoSplitInfoSet(prev => {
+            return { ...prev, duration: duration }
+          })
+        } else if (returnCode.isValueCancel()) {
+          console.log('Encode canceled');
+        } else {
+          console.log(
+            `failed and rc ${returnCode}.${failStackTrace}`,
+          );
+
+          runningVideoSplitInfoSet(prev => {
+            return { ...prev, errorSeen: prev.errorSeen ? [...prev.errorSeen, `failed and rc ${returnCode}.${failStackTrace}`] : [`failed and rc ${returnCode}.${failStackTrace}`] }
+          })
+        }
       });
 
       setTimeout(() => {
@@ -650,3 +650,4 @@ const styles = StyleSheet.create({
     height: 25
   }
 });
+
